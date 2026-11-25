@@ -2,7 +2,7 @@ name: naver-to-gmail
 
 on:
   schedule:
-    # 한 번 켜지면 약 5시간 40분 동안 1분마다 확인. 30분마다 다음 실행이 대기열에 들어가 이어받음.
+    # 한 번 켜지면 약 5시간 40분 동안 20초마다 확인. 30분마다 다음 실행이 대기열에 들어가 이어받음.
     - cron: "*/30 * * * *"
   workflow_dispatch:
     inputs:
@@ -28,8 +28,9 @@ jobs:
           GMAIL_USER: ${{ secrets.GMAIL_USER }}
           GMAIL_PASS: ${{ secrets.GMAIL_PASS }}
           GAS_URL: ${{ secrets.GAS_URL }}
+          ORDER_URL: ${{ secrets.ORDER_URL }}
           SINCE_DATE: ${{ github.event.inputs.since_date }}
           DAYS: "2"
           LOOP_MINUTES: "340"
-          INTERVAL_SECONDS: "60"
+          INTERVAL_SECONDS: "20"
         run: python copy_mail.py
