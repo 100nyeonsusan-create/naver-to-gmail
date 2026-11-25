@@ -146,8 +146,10 @@ def main():
                 typ, data = n.uid("SEARCH", None, "SINCE", since)
             uids = [u for u in (data[0].split() if data and data[0] else []) if int(u) > state["last"]]
             if uids or not state["last"]:
-                f = copy_uids(n, g, uids)
+                f, c = copy_uids(n, g, uids)
                 total_fail += f
+                if c:
+                    ping_order_sheet()
             if uids:
                 state["last"] = max(state["last"], max(int(u) for u in uids))
             elif not state["last"]:
@@ -206,7 +208,22 @@ def copy_uids(n, g, uids):
             log("실패:", type(e).__name__, str(e)[:120])
 
     log(f"복사 {copied} / 이미 있음 {skipped} / Message-ID 없음 {noid} / 실패 {failed}")
-    return failed
+    return failed, copied
+
+
+def ping_order_sheet():
+    """새 메일을 넣었으면 주문 시트(Apps Script 웹 앱 ORDER_URL)에 바로 메일 확인을 시킴."""
+    url = os.environ.get("ORDER_URL", "").strip()
+    if not url:
+        return
+    import urllib.request
+    try:
+        time.sleep(5)  # 지메일 검색에 잡힐 시간
+        req = urllib.request.Request(url, data=b"{}", headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=300) as r:
+            log("주문 시트 확인 요청:", r.read().decode("utf-8", "replace")[:200].replace("\n", " / "))
+    except Exception as e:
+        log("주문 시트 확인 요청 실패:", type(e).__name__, str(e)[:100])
 
 
 if __name__ == "__main__":
