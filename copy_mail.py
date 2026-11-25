@@ -1,0 +1,134 @@
+"""네이버 받은메일함 -> 지메일 받은편지함 복사 (네이버는 읽기 전용).
+
+- 네이버: EXAMINE(읽기 전용) + BODY.PEEK 만 사용. 삭제·이동·읽음 표시 안 함.
+- 지메일: 같은 Message-ID 가 이미 있으면 건너뛰고, 없으면 원본 그대로 받은편지함에 넣음(APPEND).
+- 로그인 정보는 환경 변수(NAVER_USER, NAVER_PASS, GMAIL_USER, GMAIL_PASS)로만 받음.
+  환경 변수가 없으면(내 PC 시험용) 입력창으로 물어봄. 어디에도 저장하지 않음.
+- DAYS: 최근 며칠치를 볼지(기본 2). SINCE_DATE(예: 25-Nov-2026)를 주면 그 날짜부터.
+"""
+import email.utils
+import imaplib
+import os
+import re
+import sys
+import time
+from datetime import datetime, timedelta, timezone
+
+KST = timezone(timedelta(hours=9))
+
+# 네이버 쪽 쓰기 명령 차단(실수 방지)
+_BLOCK = {"STORE", "COPY", "MOVE", "EXPUNGE", "DELETE", "RENAME", "APPEND", "UID STORE", "UID COPY", "UID MOVE"}
+
+
+class ReadOnlyIMAP(imaplib.IMAP4_SSL):
+    def _command(self, name, *args):
+        if name.upper() in _BLOCK:
+            raise RuntimeError("네이버에는 쓰기 명령 금지: " + name)
+        return super()._command(name, *args)
+
+    def uid(self, command, *args):
+        if command.upper() in ("STORE", "COPY", "MOVE", "EXPUNGE"):
+            raise RuntimeError("네이버에는 쓰기 명령 금지: UID " + command)
+        return super().uid(command, *args)
+
+
+def ask(label, secret=True):
+    import tkinter as tk
+    from tkinter import simpledialog
+    root = tk.Tk(); root.withdraw(); root.attributes("-topmost", True)
+    v = simpledialog.askstring("메일 복사", label, show="*" if secret else None, parent=root)
+    root.destroy()
+    if not v:
+        sys.exit("입력 취소")
+    return v.strip()
+
+
+def cred(name, label, secret=True):
+    v = os.environ.get(name, "").strip()
+    return v if v else ask(label, secret)
+
+
+def log(*a):
+    print(datetime.now(KST).strftime("%H:%M:%S"), *a, flush=True)
+
+
+def all_mail_box(g):
+    typ, data = g.list()
+    for line in data or []:
+        s = line.decode("utf-8", "replace")
+        if "\\All" in s:
+            m = re.search(r'"([^"]+)"\s*$', s) or re.search(r"(\S+)\s*$", s)
+            if m:
+                return m.group(1)
+    return "INBOX"
+
+
+def main():
+    nu = cred("NAVER_USER", "네이버 아이디(예: 100nyeon85@naver.com)", False)
+    np_ = cred("NAVER_PASS", "네이버 비밀번호(앱 비밀번호)")
+    gu = cred("GMAIL_USER", "지메일 주소", False)
+    gp = cred("GMAIL_PASS", "지메일 앱 비밀번호").replace(" ", "")
+
+    since = os.environ.get("SINCE_DATE", "").strip()
+    if not since:
+        days = int(os.environ.get("DAYS", "2") or 2)
+        since = (datetime.now(KST) - timedelta(days=days)).strftime("%d-%b-%Y")
+
+    n = ReadOnlyIMAP("imap.naver.com", 993)
+    n.login(nu, np_)
+    typ, _ = n.select("INBOX", readonly=True)  # EXAMINE
+    if typ != "OK":
+        sys.exit("네이버 받은메일함 열기 실패")
+    typ, data = n.uid("SEARCH", None, "SINCE", since)
+    uids = data[0].split() if data and data[0] else []
+    log(f"네이버 {since} 이후 메일 {len(uids)}통")
+
+    g = imaplib.IMAP4_SSL("imap.gmail.com", 993)
+    g.login(gu, gp)
+    box = all_mail_box(g)
+    g.select('"%s"' % box if " " in box and not box.startswith('"') else box, readonly=True)
+
+    copied = skipped = noid = failed = 0
+    for uid in uids:
+        try:
+            typ, d = n.uid("FETCH", uid, "(INTERNALDATE BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)])")
+            hdr = b""; idate = None
+            for part in d:
+                if isinstance(part, tuple):
+                    hdr = part[1]
+                    idate = imaplib.Internaldate2tuple(part[0])
+            m = re.search(rb"Message-ID:\s*(<[^>\r\n]+>)", hdr, re.I)
+            if not m:
+                noid += 1
+                continue
+            mid = m.group(1).decode("utf-8", "replace").replace('"', "")
+            typ, r = g.search(None, "X-GM-RAW", '"rfc822msgid:%s"' % mid)
+            if typ == "OK" and r and r[0].split():
+                skipped += 1
+                continue
+            typ, d = n.uid("FETCH", uid, "(BODY.PEEK[])")
+            raw = next((p[1] for p in d if isinstance(p, tuple)), None)
+            if not raw:
+                failed += 1
+                continue
+            when = time.mktime(idate) if idate else time.time()
+            typ, _ = g.append("INBOX", None, imaplib.Time2Internaldate(when), raw)
+            if typ == "OK":
+                copied += 1
+            else:
+                failed += 1
+        except Exception as e:  # 한 통 실패해도 계속
+            failed += 1
+            log("실패:", type(e).__name__, str(e)[:120])
+
+    log(f"복사 {copied} / 이미 있음 {skipped} / Message-ID 없음 {noid} / 실패 {failed}")
+    try:
+        n.logout(); g.logout()
+    except Exception:
+        pass
+    if failed:
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
