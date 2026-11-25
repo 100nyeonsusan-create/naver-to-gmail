@@ -63,11 +63,61 @@ def all_mail_box(g):
     return "INBOX"
 
 
+class GmailImap:
+    """지메일 앱 비밀번호로 IMAP 에 직접 넣는 방식."""
+    def __init__(self, user, pw):
+        self.g = imaplib.IMAP4_SSL("imap.gmail.com", 993)
+        self.g.login(user, pw)
+        box = all_mail_box(self.g)
+        self.g.select('"%s"' % box if " " in box and not box.startswith('"') else box, readonly=True)
+
+    def has(self, mid):
+        typ, r = self.g.search(None, "X-GM-RAW", '"rfc822msgid:%s"' % mid)
+        return typ == "OK" and bool(r and r[0].split())
+
+    def put(self, raw, when):
+        typ, _ = self.g.append("INBOX", None, imaplib.Time2Internaldate(when), raw)
+        return typ == "OK"
+
+    def logout(self):
+        self.g.logout()
+
+
+class Receiver:
+    """100nyeonsusan 계정의 Apps Script 웹 앱(doPost)으로 보내는 방식(앱 비밀번호 불필요)."""
+    def __init__(self, url):
+        self.url = url
+
+    def _post(self, payload):
+        import base64, json, urllib.request
+        req = urllib.request.Request(self.url, data=json.dumps(payload).encode(),
+                                     headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=120) as r:
+            res = json.loads(r.read().decode("utf-8"))
+        if not res.get("ok"):
+            raise RuntimeError("받는 곳 오류: " + str(res.get("err")))
+        return res
+
+    def has(self, mid):
+        return bool(self._post({"op": "has", "ids": [mid]})["has"][0])
+
+    def put(self, raw, when):
+        import base64
+        self._post({"op": "put", "raw": base64.b64encode(raw).decode()})
+        return True
+
+    def logout(self):
+        pass
+
+
 def main():
     nu = cred("NAVER_USER", "네이버 아이디(예: 100nyeon85@naver.com)", False)
     np_ = cred("NAVER_PASS", "네이버 비밀번호(앱 비밀번호)")
-    gu = cred("GMAIL_USER", "지메일 주소", False)
-    gp = cred("GMAIL_PASS", "지메일 앱 비밀번호").replace(" ", "")
+    gas_url = os.environ.get("GAS_URL", "").strip()
+    gu = gp = ""
+    if not gas_url:
+        gu = cred("GMAIL_USER", "지메일 주소", False)
+        gp = cred("GMAIL_PASS", "지메일 앱 비밀번호").replace(" ", "")
 
     since = os.environ.get("SINCE_DATE", "").strip()
     if not since:
@@ -83,10 +133,7 @@ def main():
     uids = data[0].split() if data and data[0] else []
     log(f"네이버 {since} 이후 메일 {len(uids)}통")
 
-    g = imaplib.IMAP4_SSL("imap.gmail.com", 993)
-    g.login(gu, gp)
-    box = all_mail_box(g)
-    g.select('"%s"' % box if " " in box and not box.startswith('"') else box, readonly=True)
+    g = Receiver(gas_url) if gas_url else GmailImap(gu, gp)
 
     copied = skipped = noid = failed = 0
     for uid in uids:
@@ -102,8 +149,7 @@ def main():
                 noid += 1
                 continue
             mid = m.group(1).decode("utf-8", "replace").replace('"', "")
-            typ, r = g.search(None, "X-GM-RAW", '"rfc822msgid:%s"' % mid)
-            if typ == "OK" and r and r[0].split():
+            if g.has(mid):
                 skipped += 1
                 continue
             typ, d = n.uid("FETCH", uid, "(BODY.PEEK[])")
@@ -112,8 +158,7 @@ def main():
                 failed += 1
                 continue
             when = time.mktime(idate) if idate else time.time()
-            typ, _ = g.append("INBOX", None, imaplib.Time2Internaldate(when), raw)
-            if typ == "OK":
+            if g.put(raw, when):
                 copied += 1
             else:
                 failed += 1
