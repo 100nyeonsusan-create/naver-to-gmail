@@ -124,17 +124,56 @@ def main():
         days = int(os.environ.get("DAYS", "2") or 2)
         since = (datetime.now(KST) - timedelta(days=days)).strftime("%d-%b-%Y")
 
-    n = ReadOnlyIMAP("imap.naver.com", 993)
-    n.login(nu, np_)
-    typ, _ = n.select("INBOX", readonly=True)  # EXAMINE
-    if typ != "OK":
-        sys.exit("네이버 받은메일함 열기 실패")
-    typ, data = n.uid("SEARCH", None, "SINCE", since)
-    uids = data[0].split() if data and data[0] else []
-    log(f"네이버 {since} 이후 메일 {len(uids)}통")
-
     g = Receiver(gas_url) if gas_url else GmailImap(gu, gp)
+    loop_min = float(os.environ.get("LOOP_MINUTES", "0") or 0)   # 0 = 한 번만
+    interval = int(os.environ.get("INTERVAL_SECONDS", "60") or 60)
+    end = time.time() + loop_min * 60
+    state = {"n": None, "last": 0}
+    total_fail = 0
+    while True:
+        try:
+            if state["n"] is None:
+                n = ReadOnlyIMAP("imap.naver.com", 993)
+                n.login(nu, np_)
+                state["n"] = n
+            n = state["n"]
+            typ, _ = n.select("INBOX", readonly=True)  # EXAMINE (다시 열면 새 메일 반영)
+            if typ != "OK":
+                raise RuntimeError("네이버 받은메일함 열기 실패")
+            if state["last"]:
+                typ, data = n.uid("SEARCH", None, "UID", "%d:*" % (state["last"] + 1))
+            else:
+                typ, data = n.uid("SEARCH", None, "SINCE", since)
+            uids = [u for u in (data[0].split() if data and data[0] else []) if int(u) > state["last"]]
+            if uids or not state["last"]:
+                f = copy_uids(n, g, uids)
+                total_fail += f
+            if uids:
+                state["last"] = max(state["last"], max(int(u) for u in uids))
+            elif not state["last"]:
+                typ, d = n.uid("SEARCH", None, "ALL")
+                allu = d[0].split() if d and d[0] else []
+                state["last"] = int(allu[-1]) if allu else 0
+        except Exception as e:
+            log("연결 오류, 다시 연결:", type(e).__name__, str(e)[:120])
+            try:
+                state["n"].logout()
+            except Exception:
+                pass
+            state["n"] = None
+        if time.time() + interval > end:
+            break
+        time.sleep(interval)
+    try:
+        state["n"] and state["n"].logout()
+    except Exception:
+        pass
+    if total_fail and not loop_min:
+        sys.exit(1)
 
+
+def copy_uids(n, g, uids):
+    log(f"새 메일 {len(uids)}통 확인")
     copied = skipped = noid = failed = 0
     for uid in uids:
         try:
@@ -167,12 +206,7 @@ def main():
             log("실패:", type(e).__name__, str(e)[:120])
 
     log(f"복사 {copied} / 이미 있음 {skipped} / Message-ID 없음 {noid} / 실패 {failed}")
-    try:
-        n.logout(); g.logout()
-    except Exception:
-        pass
-    if failed:
-        sys.exit(1)
+    return failed
 
 
 if __name__ == "__main__":
