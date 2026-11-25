@@ -2,9 +2,8 @@ name: naver-to-gmail
 
 on:
   schedule:
-    # 한국 시간 08:00~20:59 는 20분마다, 그 외에는 1시간마다 (UTC 기준으로 적음)
-    - cron: "*/20 23,0-11 * * *"
-    - cron: "0 12-22 * * *"
+    # 한 번 켜지면 약 5시간 40분 동안 1분마다 확인. 30분마다 다음 실행이 대기열에 들어가 이어받음.
+    - cron: "*/30 * * * *"
   workflow_dispatch:
     inputs:
       since_date:
@@ -19,7 +18,7 @@ concurrency:
 jobs:
   copy:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 355
     steps:
       - uses: actions/checkout@v4
       - name: Copy mail
@@ -31,4 +30,6 @@ jobs:
           GAS_URL: ${{ secrets.GAS_URL }}
           SINCE_DATE: ${{ github.event.inputs.since_date }}
           DAYS: "2"
+          LOOP_MINUTES: "340"
+          INTERVAL_SECONDS: "60"
         run: python copy_mail.py
